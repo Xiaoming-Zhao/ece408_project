@@ -25,6 +25,7 @@ test_images, test_labels = load_mnist(
 print "done"
 
 # Reduce the size of the dataset, if desired
+# dataset_size = max(0, min(dataset_size, 10000))
 dataset_size = max(0, min(dataset_size, 10000))
 test_images = test_images[:dataset_size]
 test_labels = test_labels[:dataset_size]
