@@ -183,6 +183,32 @@ __global__ void matrixMultiply(float *A, float *B, float *C,
 }
 
 
+// No tile: Compute C = A * B
+__global__ void matrixMultiply_Constant(float *B, float *C,
+                                        int numARows, int numAColumns,
+                                        int numBRows, int numBColumns,
+                                        int b) {
+  //@@ Insert code to implement matrix multiplication here
+  // The row index for A and C
+  int Row = blockIdx.y * blockDim.y + threadIdx.y;
+  // The column index for B and C
+  int Col = blockIdx.x * blockDim.x + threadIdx.x;
+
+  int numCRows = numARows;
+  int numCColumns = numBColumns;
+
+  if((Row < numCRows) && (Col < numCColumns)) {
+    float pValue = 0.0;
+
+    for(int k = 0; k < numAColumns; k++) {
+      pValue += device_k[Row * numAColumns + k] * B[k * numBColumns + Col];
+    }
+
+    C[b * (numCRows * numCColumns) + Row * numCColumns + Col] = pValue;
+  }
+}
+
+
 // Tile memory: Compute C = A * B
 __global__ void matrixMultiplyShared(float *A, float *B, float *C,
                                      int numARows, int numAColumns,
@@ -362,12 +388,18 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y,
         // unroll each sample to expanded matrix
         unroll_kernel<<<num_blocks_unroll, CUDA_MAX_NUM_THREADS>>>(b, C, H, W, K, x.dptr_, x_unroll);
 
-        // tiled matrix multiplication
+        // 1. simple matrix multiplication
         // matrixMultiply<<<gridDim, blockDim>>>(w.dptr_, x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, b);
-        // matrixMultiplyShared<<<gridDim, blockDim>>>(w.dptr_, x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, maxNum, b);
-        matrixMultiplySharedConst<<<gridDim, blockDim>>>(x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, maxNum, b);
-    }
 
+        // 2. constant memory
+        matrixMultiply_Constant<<<gridDim, blockDim>>>(x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, b);
+        
+        // 3. tiled matrix multiplication
+        // matrixMultiplyShared<<<gridDim, blockDim>>>(w.dptr_, x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, maxNum, b);
+        
+        // 4. tiled matrix multiplication and constant kernel
+        // matrixMultiplySharedConst<<<gridDim, blockDim>>>(x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, maxNum, b);
+    }
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());

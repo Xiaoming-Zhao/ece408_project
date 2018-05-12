@@ -129,8 +129,8 @@ __global__ void forward_kernel_const(float *y, const float *x,
 }
 
 
-// unroll matrix kernel
-__global__ void unroll_kernel(int C, int H, int W, int K, float *X, float *X_unroll)
+// unroll matrix kernel for all samples of B
+__global__ void unroll_kernel_B(int C, int H, int W, int K, float *X, float *X_unroll)
 {
     int c, s, h_out, w_out, h_unroll, w_unroll, h_base, p, q;
     int t = blockIdx.x * CUDA_MAX_NUM_THREADS + threadIdx.x;
@@ -138,6 +138,34 @@ __global__ void unroll_kernel(int C, int H, int W, int K, float *X, float *X_unr
     int W_out = W - K + 1;
     int W_unroll = H_out * W_out;
     int b = blockIdx.y;
+
+    if (t < C * W_unroll) {
+        c = int(t / W_unroll);
+        s = t % W_unroll;
+        h_out = s / W_out;
+        w_out = s % W_out;
+        w_unroll = h_out * W_out + w_out;
+        h_base = c * K * K;
+
+        for (p = 0; p < K; p++) {
+            for (q = 0; q < K; q++) {
+                h_unroll = h_base + p * K + q;
+                X_unroll[h_unroll * W_unroll + w_unroll] = \
+                    X[b * (C * H * W) + c * (H * W) + (h_out + p) * W + (w_out + q)];
+            }
+        }
+    }
+}
+
+
+// unroll matrix kernel
+__global__ void unroll_kernel(int b, int C, int H, int W, int K, float *X, float *X_unroll)
+{
+    int c, s, h_out, w_out, h_unroll, w_unroll, h_base, p, q;
+    int t = blockIdx.x * CUDA_MAX_NUM_THREADS + threadIdx.x;
+    int H_out = H - K + 1;
+    int W_out = W - K + 1;
+    int W_unroll = H_out * W_out;
 
     if (t < C * W_unroll) {
         c = int(t / W_unroll);
@@ -356,18 +384,25 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y,
     // settings for launching grid
     // grid and block settings for unroll kernel
     int num_blocks_unroll = ceil((1.0 * C * H_out * W_out) / CUDA_MAX_NUM_THREADS);
-    dim3 blockDim_unroll(CUDA_MAX_NUM_THREADS);
-    dim3 gridDim_unroll(num_blocks_unroll, B);
+    // dim3 blockDim_unroll(CUDA_MAX_NUM_THREADS);
+    // dim3 gridDim_unroll(num_blocks_unroll, B);
+    // unroll each sample to expanded matrix
+    // unroll_kernel_B<<<gridDim_unroll, blockDim_unroll>>>(C, H, W, K, x.dptr_, x_unroll);
+    
     dim3 blockDim(TILE_WIDTH, TILE_WIDTH);
     dim3 gridDim(ceil(1.0 * W_unroll / TILE_WIDTH), ceil(1.0 * M / TILE_WIDTH), B);
-    // unroll each sample to expanded matrix
-    unroll_kernel<<<gridDim_unroll, blockDim_unroll>>>(C, H, W, K, x.dptr_, x_unroll);
-
-    // tiled matrix multiplication
-    // matrixMultiply<<<gridDim, blockDim>>>(w.dptr_, x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, b);
-    // matrixMultiplyShared<<<gridDim, blockDim>>>(w.dptr_, x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, maxNum, b);
     for (int b = 0; b < B; b++) {
-        matrixMultiplySharedConst<<<gridDim, blockDim>>>(x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, maxNum, b);
+        // unroll each sample to expanded matrix
+        unroll_kernel<<<num_blocks_unroll, CUDA_MAX_NUM_THREADS>>>(b, C, H, W, K, x.dptr_, x_unroll);
+
+        // 1. simple matrix multiplication
+        matrixMultiply<<<gridDim, blockDim>>>(w.dptr_, x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, b);
+    
+        // 2. tiled matrix multiplication
+        // matrixMultiplyShared<<<gridDim, blockDim>>>(w.dptr_, x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, maxNum, b);
+
+        // 3. tiled matrix multiplication and constant kernel
+        // matrixMultiplySharedConst<<<gridDim, blockDim>>>(x_unroll, y.dptr_, M, H_unroll, H_unroll, W_unroll, maxNum, b);
     }
 
 
